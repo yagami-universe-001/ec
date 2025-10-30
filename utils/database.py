@@ -1,6 +1,7 @@
 # utils/database.py
 import aiosqlite
 import json
+import os
 from typing import Optional, Dict, Any, List
 from utils.config import Config
 
@@ -10,6 +11,15 @@ class Database:
     @staticmethod
     async def init_db():
         """Initialize database with all required tables"""
+        # Ensure database directory exists
+        db_dir = os.path.dirname(Database.DB_PATH)
+        if db_dir and not os.path.exists(db_dir):
+            os.makedirs(db_dir, exist_ok=True)
+        
+        # If DB_PATH is just a filename, use current directory
+        if not db_dir:
+            Database.DB_PATH = os.path.join(os.getcwd(), Database.DB_PATH)
+        
         async with aiosqlite.connect(Database.DB_PATH) as db:
             # Users table
             await db.execute("""
