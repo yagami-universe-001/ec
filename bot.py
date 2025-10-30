@@ -3,7 +3,6 @@ import os
 import logging
 from pyrogram import Client, idle
 from utils.config import Config
-from utils.database import Database
 
 # Setup logging
 logging.basicConfig(
@@ -34,8 +33,20 @@ class Bot(Client):
         self.username = me.username
         self.id = me.id
         
-        # Initialize database
-        await Database.init_db()
+        # Initialize database after bot starts
+        try:
+            from utils.database import Database
+            await Database.init_db()
+            logger.info("Database initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize database: {e}")
+            logger.info("Attempting to create database directory...")
+            # Create database directory if it doesn't exist
+            db_dir = os.path.dirname(Config.DATABASE_URL)
+            if db_dir and not os.path.exists(db_dir):
+                os.makedirs(db_dir, exist_ok=True)
+            # Try again
+            await Database.init_db()
         
         logger.info(f"╔══════════════════════════════════════════╗")
         logger.info(f"║  Bot Started Successfully!               ║")
@@ -48,5 +59,13 @@ class Bot(Client):
         logger.info("Bot stopped!")
 
 if __name__ == "__main__":
+    # Ensure all directories exist before starting
+    try:
+        Config.create_dirs()
+        logger.info("Directories created successfully")
+    except Exception as e:
+        logger.error(f"Error creating directories: {e}")
+    
+    # Start bot
     bot = Bot()
     bot.run()
