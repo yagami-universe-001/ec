@@ -12,7 +12,7 @@ import rarfile
 
 @Client.on_message(filters.command("Unzip") & filters.private)
 async def unzip_file(client: Client, message: Message):
-    """Unzip compressed files"""
+    """Unzip compressed files"""for 
     user_id = message.from_user.id
     user_name = message.from_user.first_name or message.from_user.username or "User"
     
