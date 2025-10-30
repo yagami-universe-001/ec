@@ -1,6 +1,6 @@
 # handlers/callbacks.py
 from pyrogram import Client, filters
-from pyrogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message
 from utils.database import Database
 from utils.config import Config
 import time

@@ -11,5 +11,6 @@ services:
       - ./downloads:/app/downloads
       - ./uploads:/app/uploads
       - ./thumbs:/app/thumbs
+      - ./data:/app/data
     # Uncomment if you want logs in console
     # tty: true

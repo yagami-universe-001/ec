@@ -11,7 +11,7 @@ class Config:
     BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
     
     # Database
-    DATABASE_URL = os.environ.get("DATABASE_URL", "bot_database.db")
+    DATABASE_URL = os.environ.get("DATABASE_URL", "/app/data/bot_database.db")
     
     # Admin settings
     ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "0").split()]
