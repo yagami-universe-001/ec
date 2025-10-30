@@ -5,6 +5,7 @@ from utils.database import Database
 from utils.ffmpeg_helper import FFmpegHelper
 from utils.config import Config
 from utils.helpers import format_size, format_time, format_progress_bar
+from utils.progress import ProgressTracker
 import os
 import time
 import asyncio
@@ -92,6 +93,7 @@ async def handle_video(client: Client, message: Message):
 async def encode_callback(client: Client, callback_query: CallbackQuery):
     """Handle encoding callbacks"""
     user_id = callback_query.from_user.id
+    user_name = callback_query.from_user.first_name or callback_query.from_user.username or "User"
     quality = callback_query.data.replace("encode_", "")
     
     if user_id not in user_videos:
@@ -102,26 +104,28 @@ async def encode_callback(client: Client, callback_query: CallbackQuery):
     
     # Show processing message
     processing_msg = await callback_query.message.reply_text(
-        "**⏳ Processing...**\n\n"
-        "**⬇️ Downloading video...**"
+        f"**⏳ Initializing...**\n\n"
+        f"Preparing to process your video..."
     )
     
     try:
         # Download video
         download_path = os.path.join(Config.DOWNLOAD_DIR, f"{user_id}_{int(time.time())}.mp4")
+        start_time = time.time()
+        
         await client.download_media(
             video_info['file_id'],
             file_name=download_path,
-            progress=download_progress,
-            progress_args=(processing_msg, "⬇️ Downloading")
+            progress=ProgressTracker.download_progress,
+            progress_args=(processing_msg, video_info['file_name'], user_name, user_id, start_time)
         )
         
         if quality == "all":
             # Encode in all qualities
-            await encode_all_qualities(client, callback_query, download_path, video_info, processing_msg)
+            await encode_all_qualities(client, callback_query, download_path, video_info, processing_msg, user_name, user_id)
         else:
             # Encode single quality
-            await encode_single(client, callback_query, download_path, video_info, quality, processing_msg)
+            await encode_single(client, callback_query, download_path, video_info, quality, processing_msg, user_name, user_id)
         
         # Clean up
         if os.path.exists(download_path):
@@ -133,9 +137,8 @@ async def encode_callback(client: Client, callback_query: CallbackQuery):
             os.remove(download_path)
 
 
-async def encode_single(client, callback_query, input_file, video_info, quality, status_msg):
+async def encode_single(client, callback_query, input_file, video_info, quality, status_msg, user_name, user_id):
     """Encode video in single quality"""
-    user_id = callback_query.from_user.id
     
     # Get user settings
     watermark = await Database.get_watermark(user_id)
@@ -155,43 +158,34 @@ async def encode_single(client, callback_query, input_file, video_info, quality,
     audio_bitrate = await Database.get_bot_setting("audio_bitrate") or Config.DEFAULT_AUDIO_BITRATE
     
     # Update status
+    bot_stats = ProgressTracker.get_bot_stats()
     await status_msg.edit_text(
-        f"**🎬 Encoding to {quality.upper()}**\n\n"
-        "**💪 Task By:** ꜱᴋ•ᴘᴀᴛʜɪʀᴀᴊ.ᴘʏ™ 𝕏\n"
-        "**📊 Progress:** 0%\n"
-        "**⚡ Speed:** Calculating...\n"
-        "**⏱ ETA:** Calculating..."
+        f"**2. Encoding to {quality.upper()}**\n\n"
+        f"┃ `{video_info['file_name']}`\n\n"
+        f"[ ○○○○○○○○○○ ] >> 0%\n"
+        f"├ Speed: Calculating...\n"
+        f"├ Progress: 00:00:00 / {format_time(video_info.get('duration', 0))}\n"
+        f"├ ETA: Calculating...\n"
+        f"├ Elapsed: 00:00:00\n"
+        f"├ Task By: {user_name}\n"
+        f"└ User ID: {user_id}\n\n"
+        f"**📊 Bot Stats**\n"
+        f"├ CPU: {bot_stats['cpu']:.1f}%\n"
+        f"├ RAM: {bot_stats['ram']:.1f}%\n"
+        f"├ UPTIME: {bot_stats['uptime']}\n"
+        f"└ F: {bot_stats['disk']} GB\n\n"
+        f"Page: 1/1 | Active Tasks: 1"
     )
     
     start_time = time.time()
-    last_update = [0]
     
     async def progress_callback(percentage, speed, eta, current, total):
         """Progress callback for encoding"""
-        current_time = time.time()
-        if current_time - last_update[0] < Config.PROGRESS_UPDATE_INTERVAL:
-            return
-        last_update[0] = current_time
-        
-        progress_bar = format_progress_bar(percentage)
-        elapsed = current_time - start_time
-        
-        text = f"""
-**🎬 Encoding to {quality.upper()}**
-
-{progress_bar} {percentage:.1f}%
-
-**💪 Task By:** ꜱᴋ•ᴘᴀᴛʜɪʀᴀᴊ.ᴘʏ™ 𝕏
-**⚡ Speed:** {speed:.2f}x
-**⏱ ETA:** {format_time(int(eta))}
-**⏰ Elapsed:** {format_time(int(elapsed))}
-**📊 Current:** {format_time(int(current))} / {format_time(int(total))}
-        """
-        
-        try:
-            await status_msg.edit_text(text)
-        except:
-            pass
+        await ProgressTracker.encoding_progress(
+            percentage, speed, eta, current, total,
+            status_msg, video_info['file_name'], quality,
+            user_name, user_id, start_time
+        )
     
     # Encode video
     success = await FFmpegHelper.encode_video(
@@ -214,12 +208,6 @@ async def encode_single(client, callback_query, input_file, video_info, quality,
     # Get encoded file size
     encoded_size = os.path.getsize(output_file)
     
-    # Update status for upload
-    await status_msg.edit_text(
-        f"**⬆️ Uploading {quality.upper()}**\n\n"
-        "**📊 Progress:** 0%"
-    )
-    
     # Download thumbnail if exists
     thumb_path = None
     if thumbnail:
@@ -231,13 +219,14 @@ async def encode_single(client, callback_query, input_file, video_info, quality,
         await FFmpegHelper.extract_thumbnail(output_file, thumb_path)
     
     # Upload video
+    upload_start = time.time()
     caption = f"""
 **✅ Encoding Complete!**
 
 **📁 File:** `{os.path.basename(output_file)}`
 **🎬 Quality:** `{quality.upper()}`
 **📦 Size:** `{format_size(encoded_size)}`
-**💪 Encoded By:** ꜱᴋ•ᴘᴀᴛʜɪʀᴀᴊ.ᴘʏ™ 𝕏
+**👤 Encoded For:** {user_name}
     """
     
     try:
@@ -246,8 +235,8 @@ async def encode_single(client, callback_query, input_file, video_info, quality,
                 document=output_file,
                 caption=caption,
                 thumb=thumb_path if os.path.exists(thumb_path) else None,
-                progress=upload_progress,
-                progress_args=(status_msg, f"⬆️ Uploading {quality.upper()}")
+                progress=ProgressTracker.upload_progress,
+                progress_args=(status_msg, os.path.basename(output_file), user_name, user_id, upload_start)
             )
         else:
             await callback_query.message.reply_video(
@@ -257,8 +246,8 @@ async def encode_single(client, callback_query, input_file, video_info, quality,
                 duration=video_info.get('duration', 0),
                 supports_streaming=True,
                 has_spoiler=user_settings['spoiler_enabled'],
-                progress=upload_progress,
-                progress_args=(status_msg, f"⬆️ Uploading {quality.upper()}")
+                progress=ProgressTracker.upload_progress,
+                progress_args=(status_msg, os.path.basename(output_file), user_name, user_id, upload_start)
             )
         
         await status_msg.delete()
@@ -272,15 +261,21 @@ async def encode_single(client, callback_query, input_file, video_info, quality,
         os.remove(thumb_path)
 
 
-async def encode_all_qualities(client, callback_query, input_file, video_info, status_msg):
+async def encode_all_qualities(client, callback_query, input_file, video_info, status_msg, user_name, user_id):
     """Encode video in all qualities"""
     qualities = ["144p", "240p", "360p", "480p", "720p", "1080p"]
     total = len(qualities)
     
+    bot_stats = ProgressTracker.get_bot_stats()
     await status_msg.edit_text(
         f"**🌟 Encoding in ALL qualities**\n\n"
         f"**Total Tasks:** {total}\n"
-        f"**Progress:** 0/{total}"
+        f"**Progress:** 0/{total}\n"
+        f"**Task By:** {user_name}\n\n"
+        f"**📊 Bot Stats**\n"
+        f"├ CPU: {bot_stats['cpu']:.1f}%\n"
+        f"├ RAM: {bot_stats['ram']:.1f}%\n"
+        f"└ UPTIME: {bot_stats['uptime']}"
     )
     
     for i, quality in enumerate(qualities, 1):
@@ -288,62 +283,26 @@ async def encode_all_qualities(client, callback_query, input_file, video_info, s
             f"**🌟 Encoding in ALL qualities**\n\n"
             f"**Current:** {quality.upper()}\n"
             f"**Progress:** {i-1}/{total}\n"
+            f"**Task By:** {user_name}\n"
             f"**Status:** Encoding..."
         )
         
-        await encode_single(client, callback_query, input_file, video_info, quality, status_msg)
+        await encode_single(client, callback_query, input_file, video_info, quality, status_msg, user_name, user_id)
         
         await asyncio.sleep(2)
     
     await status_msg.edit_text(
         f"**✅ All encodings complete!**\n\n"
         f"**Total:** {total} videos\n"
-        f"**Encoded By:** ꜱᴋ•ᴘᴀᴛʜɪʀᴀᴊ.ᴘʏ™ 𝕏"
+        f"**Encoded For:** {user_name}"
     )
-
-
-async def download_progress(current, total, status_msg, prefix):
-    """Download progress callback"""
-    percentage = (current / total) * 100
-    progress_bar = format_progress_bar(percentage)
-    
-    text = f"""
-**{prefix}**
-
-{progress_bar} {percentage:.1f}%
-
-**📦 Downloaded:** {format_size(current)} / {format_size(total)}
-    """
-    
-    try:
-        await status_msg.edit_text(text)
-    except:
-        pass
-
-
-async def upload_progress(current, total, status_msg, prefix):
-    """Upload progress callback"""
-    percentage = (current / total) * 100
-    progress_bar = format_progress_bar(percentage)
-    
-    text = f"""
-**{prefix}**
-
-{progress_bar} {percentage:.1f}%
-
-**📤 Uploaded:** {format_size(current)} / {format_size(total)}
-    """
-    
-    try:
-        await status_msg.edit_text(text)
-    except:
-        pass
 
 
 @Client.on_message(filters.command(["144p", "240p", "360p", "480p", "720p", "1080p", "2160p"]) & filters.private)
 async def quality_command(client: Client, message: Message):
     """Handle quality commands"""
     user_id = message.from_user.id
+    user_name = message.from_user.first_name or message.from_user.username or "User"
     
     if user_id not in user_videos:
         await message.reply_text("**⚠️ Please send a video first!**")
@@ -351,22 +310,28 @@ async def quality_command(client: Client, message: Message):
     
     quality = message.command[0][1:]  # Remove '/'
     
-    # Create fake callback query for encode_single
-    class FakeCallbackQuery:
-        def __init__(self, message):
-            self.message = message
-            self.from_user = message.from_user
-    
-    fake_cb = FakeCallbackQuery(message)
     video_info = user_videos[user_id]
     
-    processing_msg = await message.reply_text("**⏳ Processing...**")
+    processing_msg = await message.reply_text("**⏳ Initializing...**")
     
     try:
         download_path = os.path.join(Config.DOWNLOAD_DIR, f"{user_id}_{int(time.time())}.mp4")
-        await client.download_media(video_info['file_id'], file_name=download_path)
+        start_time = time.time()
         
-        await encode_single(client, fake_cb, download_path, video_info, quality, processing_msg)
+        await client.download_media(
+            video_info['file_id'],
+            file_name=download_path,
+            progress=ProgressTracker.download_progress,
+            progress_args=(processing_msg, video_info['file_name'], user_name, user_id, start_time)
+        )
+        
+        class FakeCallbackQuery:
+            def __init__(self, message):
+                self.message = message
+                self.from_user = message.from_user
+        
+        fake_cb = FakeCallbackQuery(message)
+        await encode_single(client, fake_cb, download_path, video_info, quality, processing_msg, user_name, user_id)
         
         if os.path.exists(download_path):
             os.remove(download_path)
@@ -378,28 +343,108 @@ async def quality_command(client: Client, message: Message):
 async def all_command(client: Client, message: Message):
     """Handle /all command"""
     user_id = message.from_user.id
+    user_name = message.from_user.first_name or message.from_user.username or "User"
     
     if user_id not in user_videos:
         await message.reply_text("**⚠️ Please send a video first!**")
         return
     
-    class FakeCallbackQuery:
-        def __init__(self, message):
-            self.message = message
-            self.from_user = message.from_user
-    
-    fake_cb = FakeCallbackQuery(message)
     video_info = user_videos[user_id]
-    
-    processing_msg = await message.reply_text("**⏳ Processing...**")
+    processing_msg = await message.reply_text("**⏳ Initializing...**")
     
     try:
         download_path = os.path.join(Config.DOWNLOAD_DIR, f"{user_id}_{int(time.time())}.mp4")
-        await client.download_media(video_info['file_id'], file_name=download_path)
+        start_time = time.time()
         
-        await encode_all_qualities(client, fake_cb, download_path, video_info, processing_msg)
+        await client.download_media(
+            video_info['file_id'],
+            file_name=download_path,
+            progress=ProgressTracker.download_progress,
+            progress_args=(processing_msg, video_info['file_name'], user_name, user_id, start_time)
+        )
+        
+        class FakeCallbackQuery:
+            def __init__(self, message):
+                self.message = message
+                self.from_user = message.from_user
+        
+        fake_cb = FakeCallbackQuery(message)
+        await encode_all_qualities(client, fake_cb, download_path, video_info, processing_msg, user_name, user_id)
         
         if os.path.exists(download_path):
             os.remove(download_path)
+    except Exception as e:
+        await processing_msg.edit_text(f"**❌ Error:** {str(e)}")
+
+
+@Client.on_message(filters.command("compress") & filters.private)
+async def compress_command(client: Client, message: Message):
+    """Compress video"""
+    user_id = message.from_user.id
+    user_name = message.from_user.first_name or message.from_user.username or "User"
+    
+    if not message.reply_to_message or (not message.reply_to_message.video and not message.reply_to_message.document):
+        await message.reply_text(
+            "**🗜 Compress Video**\n\n"
+            "**Usage:** Reply to a video with `/compress`\n\n"
+            "This will compress the video to reduce file size."
+        )
+        return
+    
+    processing_msg = await message.reply_text("**⏳ Initializing...**")
+    
+    try:
+        file = message.reply_to_message.video or message.reply_to_message.document
+        file_name = file.file_name or f"video_{int(time.time())}.mp4"
+        
+        # Download
+        input_path = os.path.join(Config.DOWNLOAD_DIR, f"{user_id}_{int(time.time())}_input.mp4")
+        start_time = time.time()
+        
+        await client.download_media(
+            message.reply_to_message,
+            file_name=input_path,
+            progress=ProgressTracker.download_progress,
+            progress_args=(processing_msg, file_name, user_name, user_id, start_time)
+        )
+        
+        # Compress
+        bot_stats = ProgressTracker.get_bot_stats()
+        await processing_msg.edit_text(
+            f"**2. Compressing**\n\n"
+            f"┃ `{file_name}`\n\n"
+            f"Processing with CRF 35...\n"
+            f"├ Task By: {user_name}\n"
+            f"└ User ID: {user_id}\n\n"
+            f"**📊 Bot Stats**\n"
+            f"├ CPU: {bot_stats['cpu']:.1f}%\n"
+            f"└ RAM: {bot_stats['ram']:.1f}%"
+        )
+        
+        output_path = os.path.join(Config.UPLOAD_DIR, f"{user_id}_{int(time.time())}_compressed.mp4")
+        success = await FFmpegHelper.compress_video(input_path, output_path, crf=35)
+        
+        if not success:
+            await processing_msg.edit_text("**❌ Compression failed!**")
+            return
+        
+        # Upload
+        upload_start = time.time()
+        file_size = os.path.getsize(output_path)
+        
+        await message.reply_video(
+            video=output_path,
+            caption=f"**✅ Video compressed!**\n\n**📦 Size:** `{format_size(file_size)}`\n**👤 Compressed For:** {user_name}",
+            progress=ProgressTracker.upload_progress,
+            progress_args=(processing_msg, file_name, user_name, user_id, upload_start)
+        )
+        
+        await processing_msg.delete()
+        
+        # Cleanup
+        for path in [input_path, output_path]:
+            if os.path.exists(path):
+                os.remove(path)
+                
     except Exception as e:
         await processing_msg.edit_text(f"**❌ Error:** {str(e)}")
